@@ -3,26 +3,21 @@
 #include <ESP8266WiFiMulti.h>
 #include <ESP8266HTTPClient.h>
 #include <WiFiClient.h>
+#include <ArduinoJson.h>
 
-#define WRITE_TO_MEGA_PIN D5
 #define EXPRESS_SERVER "http://192.168.22.146:4000"
 
 ESP8266WiFiMulti WiFiMulti;
-bool isQuerying;
 bool readyToRequest;
-String healthCheckUrl;
-String carEnteringUrl;
+const String healthCheckUrl = String(EXPRESS_SERVER) + "/healthcheck";
+const String carEnteringUrl = String(EXPRESS_SERVER) + "/api/v1/cards/linked-vehicle?cardId=";
+const String updateParkingSlotUrl = String(EXPRESS_SERVER) + "/api/v1/parking-slots";
 WiFiClient client;
 HTTPClient http;
 
 void setup() {
   Serial.begin(9600);
-  pinMode(WRITE_TO_MEGA_PIN, OUTPUT);
-  digitalWrite(WRITE_TO_MEGA_PIN, LOW);
-  isQuerying = false;
   readyToRequest = false;
-  healthCheckUrl = String(EXPRESS_SERVER) + "/healthcheck";
-  carEnteringUrl = String(EXPRESS_SERVER) + "/api/v1/cards/linked-vehicle?cardId=";
 
   for (uint8_t t = 4; t > 0; t--) {
     Serial.printf("[SETUP] WAIT %d...\n", t);
@@ -51,28 +46,60 @@ String urlencode(const String &str) {
 }
 
 void requestForCarEntering (String value) {
+  http.setTimeout(30000);
   String url = carEnteringUrl + urlencode(value);
-  if (http.begin(client, url) && !isQuerying) {
-    isQuerying = true;
-    Serial.println("[HTTP] GET: " + url);
-    int httpCode = http.GET();
-    Serial.println(url);
 
-    if (httpCode > 0) {
-      Serial.printf("[HTTP] GET... code: %d\n", httpCode);
-      digitalWrite(WRITE_TO_MEGA_PIN, HIGH);
+  if (!http.begin(client, url)) {
+    readyToRequest = false;
+    Serial.println("[HTTP] Unable to connect");
+    return;
+  }
 
-      if (httpCode == HTTP_CODE_OK || httpCode == HTTP_CODE_MOVED_PERMANENTLY) {
-        String payload = http.getString();
-        Serial.println(payload);
+  Serial.println("[HTTP] GET: " + url);
+  int httpCode = http.GET();
+
+  if (httpCode > 0) {
+    if (httpCode == HTTP_CODE_OK || httpCode == HTTP_CODE_MOVED_PERMANENTLY) {
+      String payload = http.getString();
+      StaticJsonDocument<200> doc;
+      DeserializationError error = deserializeJson(doc, payload);
+
+      if (error) {
+        Serial.println("JSON parse failed");
+        return;
       }
+
+      String info = doc["info"].as<String>();
+
+      Serial.println("USER:" + info);
+      Serial.println("CHECKING-RESULT:1");
+    } else {
+      Serial.println("CHECKING-RESULT:0");
+    }
+  } else {
+    readyToRequest = false;
+    Serial.printf("[HTTP] GET... failed, error: %s\n", http.errorToString(httpCode).c_str());
+  }
+
+  http.end();
+}
+
+void requestToUpdateParkingState (String value) {
+  http.setTimeout(30000);
+  if (http.begin(client, updateParkingSlotUrl)) {
+    http.addHeader("Content-Type", "application/json");
+    Serial.println("[HTTP] PUT: " + updateParkingSlotUrl);
+    String payload = "{\"states\":\"" + value +  "\"}";
+    int httpCode = http.PUT(payload);
+    
+    if (httpCode > 0) {
+      Serial.printf("[HTTP] PUT... code: %d\n", httpCode);
     } else {
       readyToRequest = false;
-      Serial.printf("[HTTP] GET... failed, error: %s\n", http.errorToString(httpCode).c_str());
+      Serial.printf("[HTTP] PUT... failed, error: %s\n", http.errorToString(httpCode).c_str());
     }
 
     http.end();
-    isQuerying = false;
   } else {
     readyToRequest = false;
     Serial.println("[HTTP] Unable to connect");
@@ -80,6 +107,7 @@ void requestForCarEntering (String value) {
 }
 
 void pingToExpressServer () {
+  http.setTimeout(2000);
   if (http.begin(client, healthCheckUrl)) {
     Serial.println("[HTTP] GET: " + healthCheckUrl);
     int httpCode = http.GET();
@@ -115,6 +143,9 @@ void loop() {
 
           if(label == "CARD"){
             requestForCarEntering(value);
+          } else if(label == "STATE") {
+            value.trim();
+            requestToUpdateParkingState(value);
           }
         }  
       }
@@ -123,9 +154,4 @@ void loop() {
       delay(1000);
     }
   }
-
-  delay(1000);
-  digitalWrite(WRITE_TO_MEGA_PIN, LOW);
 }
-
-
